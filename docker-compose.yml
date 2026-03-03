@@ -6,7 +6,7 @@ services:
     container_name: kalshi-bot
     restart: unless-stopped
     env_file:
-      - .env
+ #     - .env
     environment:
       # Override the key path to match the container mount
       - KALSHI_PRIVATE_KEY_PATH=/app/keys/private_key.pem
