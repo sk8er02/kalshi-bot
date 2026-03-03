@@ -101,9 +101,13 @@ class MarketInfo:
         if self.spread_cents > 12 or self.yes_bid <= 0 or self.yes_ask >= 100:
             return False
 
-        # Crypto: allow very short-term (down to 10 minutes)
+        # Crypto: allow very short-term (down to 10 minutes) but skip yearly markets
         if self.is_crypto:
-            return self.minutes_to_resolution >= config.CRYPTO_MIN_MINUTES_TO_RESOLUTION
+            if self.minutes_to_resolution < config.CRYPTO_MIN_MINUTES_TO_RESOLUTION:
+                return False
+            if self.days_to_resolution > config.CRYPTO_MAX_DAYS_TO_RESOLUTION:
+                return False  # Skip yearly crypto markets (KXBTCMAXY, etc.)
+            return True
 
         # Non-crypto: require at least MIN_DAYS_TO_RESOLUTION
         return self.days_to_resolution >= config.MIN_DAYS_TO_RESOLUTION
@@ -376,16 +380,19 @@ def fetch_open_markets(max_pages: int = 8, force_refresh: bool = False) -> list[
 
 def fetch_crypto_markets(force_refresh: bool = False) -> list[MarketInfo]:
     """
-    Return only crypto markets from the full market list,
-    sorted by opportunity score. These are short-term BTC/ETH/etc. markets.
+    Return only SHORT-TERM crypto markets from the full market list,
+    sorted by opportunity score. Filters out yearly markets (>7 days).
     """
     all_markets = fetch_open_markets(force_refresh=force_refresh)
+    # is_crypto check + is_tradeable already filters by max days
     crypto = [m for m in all_markets if m.is_crypto]
     crypto.sort(key=lambda m: m.opportunity_score, reverse=True)
     if crypto:
         logger.info(
-            f"Crypto markets: {len(crypto)} found | "
+            f"Short-term crypto: {len(crypto)} found (≤{config.CRYPTO_MAX_DAYS_TO_RESOLUTION}d) | "
             f"top: {crypto[0].ticker} (score={crypto[0].opportunity_score}, "
             f"{crypto[0].minutes_to_resolution:.0f}min to resolution)"
         )
+    else:
+        logger.debug("No short-term crypto markets found (all filtered out)")
     return crypto

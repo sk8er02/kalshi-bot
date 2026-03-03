@@ -15,7 +15,7 @@ Stop with:  Ctrl+C
 import sys
 import signal
 import time as _time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
@@ -538,6 +538,8 @@ def main() -> None:
         id="crypto_trading_cycle",
         max_instances=1,
         misfire_grace_time=30,
+        # Stagger 90s after main cycle to avoid simultaneous AI request bursts
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=90),
     )
 
     scheduler.add_job(

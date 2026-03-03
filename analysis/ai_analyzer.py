@@ -9,6 +9,7 @@ If |edge| > MIN_EDGE_CENTS, it suggests the market is mispriced.
 """
 
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -21,6 +22,11 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 _openrouter_client: Optional[OpenAI] = None
+
+# Model-level cooldown: skip models that returned 402 (payment/limit exceeded)
+# {model_name: timestamp_when_cooldown_expires}
+_model_cooldowns: dict[str, float] = {}
+_MODEL_COOLDOWN_SECONDS: float = 900  # 15-minute cooldown after 402
 
 
 def _get_client() -> OpenAI:
@@ -140,8 +146,16 @@ def estimate_probability(
     ]
 
     client = _get_client()
+    now = time.time()
 
     for model_name in models_to_try:
+        # Skip models on cooldown (402 = payment/limit exceeded)
+        cooldown_expires = _model_cooldowns.get(model_name, 0)
+        if now < cooldown_expires:
+            remaining = int(cooldown_expires - now)
+            logger.debug(f"Skipping {model_name} (on cooldown for {remaining}s more)")
+            continue
+
         try:
             response = client.chat.completions.create(
                 model=model_name,
@@ -170,7 +184,16 @@ def estimate_probability(
             )
 
         except APIError as e:
-            logger.warning(f"OpenRouter error with model {model_name}: {e}")
+            error_code = getattr(e, 'status_code', 0)
+            if error_code == 402:
+                # Payment/limit exceeded — put model on 15-min cooldown
+                _model_cooldowns[model_name] = time.time() + _MODEL_COOLDOWN_SECONDS
+                logger.warning(
+                    f"Model {model_name} hit spend limit (402), "
+                    f"cooling down for {_MODEL_COOLDOWN_SECONDS // 60}min"
+                )
+            else:
+                logger.warning(f"OpenRouter error with {model_name} ({error_code}): {e}")
             continue
         except Exception as e:
             logger.warning(f"Unexpected error with model {model_name}: {e}")
@@ -179,8 +202,8 @@ def estimate_probability(
     return AIEstimate(
         probability=50,
         confidence=0.0,
-        reasoning="All AI models failed",
+        reasoning="All AI models failed or on cooldown",
         model_used="none",
         success=False,
-        error="All OpenRouter models failed",
+        error="All OpenRouter models failed or on cooldown",
     )

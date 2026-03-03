@@ -13,6 +13,7 @@ Signal logic:
 Only after all gates pass does it produce an actionable signal.
 """
 
+import time as _time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -220,7 +221,10 @@ def analyze_markets_batch(
         markets_with_news.append((market, news))
 
     # Step 2: Run AI analysis on top M markets (by score)
+    # Space out AI calls to avoid OpenRouter rate limits (~10 req/min)
     for i, (market, news) in enumerate(markets_with_news[:ai_limit]):
+        if i > 0:
+            _time.sleep(3)  # 3-second gap between AI calls to stay under rate limits
         logger.debug(f"Analyzing market {i + 1}/{min(ai_limit, len(markets_with_news))}: {market.ticker}")
         signal = analyze_market(market, news_articles=news)
         signals.append(signal)

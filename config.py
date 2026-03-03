@@ -102,6 +102,8 @@ CRYPTO_TICKER_PREFIXES: list[str] = [
 ]
 # Minimum time to resolution for crypto (10 minutes)
 CRYPTO_MIN_MINUTES_TO_RESOLUTION: float = 10.0
+# Maximum time to resolution for crypto — skip yearly markets (7 days = 10080 min)
+CRYPTO_MAX_DAYS_TO_RESOLUTION: float = 7.0
 # Close crypto positions before resolution (5 minutes before)
 CRYPTO_CLOSE_BEFORE_RESOLUTION_MINUTES: int = 5
 # Crypto trading cycle runs more frequently (every 2 minutes)
