@@ -2,10 +2,11 @@
 main.py — Kalshi AI Trading Bot entry point.
 
 Runs scheduled jobs:
-  1. trading_cycle()         every 5 minutes — discover markets, generate signals, place orders
-  2. position_monitor()      every 15 minutes — check P&L, close positions at targets/stops
-  3. stale_order_cleanup()   every 30 minutes — cancel unfilled GTC orders older than 60 min
-  4. daily_reset()           daily at midnight — log P&L summary, reset kill switch
+  1. trading_cycle()         every 5 min  — general market discovery + signals + orders
+  2. crypto_trading_cycle()  every 2 min  — fast cycle for short-term BTC/ETH/crypto
+  3. position_monitor()      every 15 min — check P&L, close positions at targets/stops
+  4. stale_order_cleanup()   every 30 min — cancel unfilled GTC orders older than 60 min
+  5. daily_reset()           midnight     — log P&L summary, reset kill switch
 
 Start with: python main.py
 Stop with:  Ctrl+C
@@ -24,7 +25,7 @@ from config import validate_config
 from utils.logger import get_logger
 from utils.state import init_db, get_daily_stats, set_kill_switch
 from kalshi.client import get_client
-from kalshi.markets import fetch_open_markets
+from kalshi.markets import fetch_open_markets, fetch_crypto_markets, is_crypto_market
 from kalshi.orders import place_limit_buy, place_limit_sell, cancel_stale_orders
 from kalshi.portfolio import get_open_positions, get_current_market_price, log_balance_summary
 from signals.signal_engine import analyze_markets_batch
@@ -43,7 +44,8 @@ scheduler = BlockingScheduler(timezone=config.TIMEZONE)
 # Analyzed-market memory: avoid re-running AI on the same market every cycle
 # {ticker: timestamp_of_last_analysis}
 _analyzed_tickers: dict[str, float] = {}
-_ANALYSIS_COOLDOWN: float = 3600  # Don't re-analyze a market for 60 minutes
+_ANALYSIS_COOLDOWN: float = 3600        # Don't re-analyze non-crypto for 60 min
+_CRYPTO_ANALYSIS_COOLDOWN: float = 300  # Re-analyze crypto every 5 min (fast moving)
 
 
 # ============================================================
@@ -53,7 +55,8 @@ _ANALYSIS_COOLDOWN: float = 3600  # Don't re-analyze a market for 60 minutes
 def _is_recently_analyzed(ticker: str) -> bool:
     """Check if we've already analyzed this market recently."""
     last_time = _analyzed_tickers.get(ticker, 0)
-    return (_time.time() - last_time) < _ANALYSIS_COOLDOWN
+    cooldown = _CRYPTO_ANALYSIS_COOLDOWN if is_crypto_market(ticker) else _ANALYSIS_COOLDOWN
+    return (_time.time() - last_time) < cooldown
 
 
 def _mark_analyzed(ticker: str) -> None:
@@ -161,7 +164,94 @@ def trading_cycle() -> None:
 
 
 # ============================================================
-# Job 2: Position Monitor (every 15 minutes)
+# Job 2: Crypto Fast Cycle (every 2 minutes)
+# ============================================================
+
+def crypto_trading_cycle() -> None:
+    """
+    Fast trading loop focused on short-term crypto markets (BTC, ETH, etc.).
+    Runs every 2 minutes to catch 15-min and hourly crypto markets.
+    Uses shorter analysis cooldown (5 min) since prices move fast.
+    """
+    logger.info("=== Crypto cycle started ===")
+
+    rm = get_risk_manager()
+    if rm.check_kill_switch():
+        return
+
+    # Get crypto markets only
+    crypto_markets = fetch_crypto_markets()
+    if not crypto_markets:
+        logger.debug("No tradeable crypto markets found")
+        return
+
+    # Filter recently analyzed
+    fresh = [m for m in crypto_markets if not _is_recently_analyzed(m.ticker)]
+    if not fresh:
+        logger.debug("All crypto markets recently analyzed")
+        return
+
+    logger.info(
+        f"Crypto: {len(fresh)} fresh markets | "
+        f"top: {fresh[0].ticker} ({fresh[0].minutes_to_resolution:.0f}min left, "
+        f"score={fresh[0].opportunity_score})"
+    )
+
+    # Mark and analyze
+    for m in fresh[:config.CRYPTO_AI_ANALYZE_TOP_N]:
+        _mark_analyzed(m.ticker)
+
+    signals = analyze_markets_batch(
+        fresh,
+        ai_analyze_limit=config.CRYPTO_AI_ANALYZE_TOP_N,
+        news_fetch_limit=config.CRYPTO_AI_ANALYZE_TOP_N,
+    )
+
+    orders_placed = 0
+    for sig in signals:
+        if sig.action == "skip":
+            continue
+
+        cost_cents = sig.suggested_price * sig.suggested_contracts
+        allowed, reason = rm.can_trade(sig.ticker, cost_cents)
+        if not allowed:
+            logger.info(f"Risk blocked crypto {sig.ticker}: {reason}")
+            continue
+
+        result = place_limit_buy(
+            ticker=sig.ticker,
+            side=sig.suggested_side,
+            price_cents=sig.suggested_price,
+            contracts=sig.suggested_contracts,
+            ai_estimate_cents=sig.ai_estimate,
+            edge_cents=sig.edge_cents,
+        )
+
+        if result:
+            orders_placed += 1
+            invalidate_position_cache()
+            logger.info(
+                f"CRYPTO order: {sig.ticker} BUY {sig.suggested_side.upper()} "
+                f"{sig.suggested_contracts}x @ {sig.suggested_price}c "
+                f"| edge={sig.edge_cents}c | AI={sig.ai_estimate}c"
+            )
+            notify_order_placed(
+                ticker=sig.ticker,
+                side=sig.suggested_side,
+                contracts=sig.suggested_contracts,
+                price_cents=sig.suggested_price,
+                edge_cents=sig.edge_cents,
+                ai_estimate=sig.ai_estimate,
+                reasoning=f"[CRYPTO] {sig.ai_reasoning}",
+            )
+            if orders_placed >= 2:
+                break
+
+    logger.info(f"=== Crypto cycle done: {orders_placed} orders placed ===")
+
+
+# ============================================================
+# Job 3: Position Monitor (every 15 min general, every 3 min crypto)
 # ============================================================
 
 def position_monitor() -> None:
@@ -251,7 +341,13 @@ def position_monitor() -> None:
                     minutes_left = (
                         close_time - datetime.now(timezone.utc)
                     ).total_seconds() / 60
-                    if minutes_left <= config.CLOSE_BEFORE_RESOLUTION_MINUTES:
+                    # Use shorter close window for crypto
+                    close_window = (
+                        config.CRYPTO_CLOSE_BEFORE_RESOLUTION_MINUTES
+                        if is_crypto_market(ticker)
+                        else config.CLOSE_BEFORE_RESOLUTION_MINUTES
+                    )
+                    if minutes_left <= close_window:
                         close_reason = "approaching_resolution"
                         logger.info(
                             f"CLOSING [{source}] (resolution in {minutes_left:.0f}min): {ticker}"
@@ -292,7 +388,7 @@ def position_monitor() -> None:
 
 
 # ============================================================
-# Job 3: Stale Order Cleanup (every 30 minutes)
+# Job 4: Stale Order Cleanup (every 30 minutes)
 # ============================================================
 
 def stale_order_cleanup() -> None:
@@ -308,7 +404,7 @@ def stale_order_cleanup() -> None:
 
 
 # ============================================================
-# Job 4: Daily Reset (midnight)
+# Job 5: Daily Reset (midnight)
 # ============================================================
 
 def daily_reset() -> None:
@@ -433,6 +529,15 @@ def main() -> None:
         max_instances=1,          # Never run overlapping cycles
         misfire_grace_time=60,    # Skip if delayed >60s
         next_run_time=datetime.now(timezone.utc),  # Run immediately on start
+    )
+
+    scheduler.add_job(
+        crypto_trading_cycle,
+        "interval",
+        minutes=config.CRYPTO_CYCLE_INTERVAL_MINUTES,
+        id="crypto_trading_cycle",
+        max_instances=1,
+        misfire_grace_time=30,
     )
 
     scheduler.add_job(

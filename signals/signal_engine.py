@@ -20,7 +20,7 @@ import config
 from analysis.ai_analyzer import AIEstimate, estimate_probability
 from analysis.news import NewsArticle, fetch_news_for_market
 from analysis.technical import TechnicalSignal, fetch_technical_signal
-from kalshi.markets import MarketInfo
+from kalshi.markets import MarketInfo, is_crypto_market
 from kalshi.orders import calculate_position_size
 from utils.logger import get_logger
 
@@ -135,9 +135,16 @@ def analyze_market(
     edge = ai_estimate.probability - market_price
     abs_edge = abs(edge)
 
-    if abs_edge < config.MIN_EDGE_CENTS:
+    # Crypto gets a lower edge requirement (higher volume = more efficient)
+    min_edge = (
+        config.CRYPTO_MIN_EDGE_CENTS
+        if is_crypto_market(market.ticker)
+        else config.MIN_EDGE_CENTS
+    )
+
+    if abs_edge < min_edge:
         return skip(
-            f"Edge too small: {abs_edge}c < {config.MIN_EDGE_CENTS}c minimum "
+            f"Edge too small: {abs_edge}c < {min_edge}c minimum "
             f"(AI={ai_estimate.probability}c vs market={market_price}c)"
         )
 

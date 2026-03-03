@@ -84,13 +84,34 @@ CLOSE_BEFORE_RESOLUTION_MINUTES: int = 60  # Exit 1 hour before resolution
 # ============================================================
 MIN_PRICE_CENTS: int = 20           # Skip near-certain NO outcomes
 MAX_PRICE_CENTS: int = 80           # Skip near-certain YES outcomes
-MIN_DAYS_TO_RESOLUTION: float = 1.0  # Skip markets resolving very soon
+MIN_DAYS_TO_RESOLUTION: float = 1.0  # Skip markets resolving very soon (non-crypto)
 MIN_ORDERBOOK_DEPTH: int = 30       # Minimum contracts on each side
 
 # How many markets to fetch news for (top N by opportunity score)
 NEWS_FETCH_TOP_N: int = 10
 # How many markets to run AI analysis on (most expensive step)
 AI_ANALYZE_TOP_N: int = 5
+
+# ============================================================
+# Crypto Short-Term Trading
+# ============================================================
+# Ticker prefixes that identify crypto markets (BTC, ETH, SOL, etc.)
+CRYPTO_TICKER_PREFIXES: list[str] = [
+    "KXBTC", "KXETH", "KXSOL", "KXDOGE", "KXXRP", "KXADA",
+    "KXBNB", "KXAVAX", "KXLINK", "KXDOT", "KXMATIC",
+]
+# Minimum time to resolution for crypto (10 minutes)
+CRYPTO_MIN_MINUTES_TO_RESOLUTION: float = 10.0
+# Close crypto positions before resolution (5 minutes before)
+CRYPTO_CLOSE_BEFORE_RESOLUTION_MINUTES: int = 5
+# Crypto trading cycle runs more frequently (every 2 minutes)
+CRYPTO_CYCLE_INTERVAL_MINUTES: int = 2
+# Crypto-specific position monitoring (every 3 minutes)
+CRYPTO_POSITION_CHECK_MINUTES: int = 3
+# How many crypto markets to analyze per cycle
+CRYPTO_AI_ANALYZE_TOP_N: int = 3
+# Lower edge requirement for crypto (high volume = lower fees effective)
+CRYPTO_MIN_EDGE_CENTS: int = 5
 
 # ============================================================
 # News Sources (free RSS feeds, no API key required)

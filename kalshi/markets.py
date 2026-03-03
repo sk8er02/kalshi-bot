@@ -22,10 +22,10 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Market discovery cache — avoid re-scanning 1600 events every 5 min cycle
+# Market discovery cache — avoid re-scanning 1600 events every cycle
 _market_cache: list | None = None
 _market_cache_time: float = 0
-_MARKET_CACHE_TTL: float = 1800  # 30 minutes
+_MARKET_CACHE_TTL: float = 600  # 10 minutes (shorter for crypto freshness)
 
 # Categories worth trading — skip Sports and Entertainment
 TRADEABLE_CATEGORIES = {
@@ -40,7 +40,18 @@ TRADEABLE_CATEGORIES = {
     "Health",
     "Social",
     "Transportation",
+    "Crypto",              # Short-term crypto markets (BTC, ETH, etc.)
+    "Digital Assets",      # Alternate category name for crypto
 }
+
+
+def is_crypto_market(ticker: str) -> bool:
+    """Check if a market ticker belongs to a crypto asset."""
+    ticker_upper = ticker.upper()
+    for prefix in config.CRYPTO_TICKER_PREFIXES:
+        if ticker_upper.startswith(prefix):
+            return True
+    return False
 
 
 @dataclass
@@ -74,14 +85,28 @@ class MarketInfo:
         return max(0, delta.total_seconds() / 86400)
 
     @property
+    def minutes_to_resolution(self) -> float:
+        delta = self.close_time - datetime.now(timezone.utc)
+        return max(0, delta.total_seconds() / 60)
+
+    @property
+    def is_crypto(self) -> bool:
+        return is_crypto_market(self.ticker)
+
+    @property
     def is_tradeable(self) -> bool:
-        return (
-            config.MIN_PRICE_CENTS <= self.yes_ask <= config.MAX_PRICE_CENTS
-            and self.days_to_resolution >= config.MIN_DAYS_TO_RESOLUTION
-            and self.spread_cents <= 12  # Skip markets with >12 cent spread
-            and self.yes_bid > 0         # Must have a real bid
-            and self.yes_ask < 100       # Must have a real ask
-        )
+        # Basic checks for all markets
+        if not (config.MIN_PRICE_CENTS <= self.yes_ask <= config.MAX_PRICE_CENTS):
+            return False
+        if self.spread_cents > 12 or self.yes_bid <= 0 or self.yes_ask >= 100:
+            return False
+
+        # Crypto: allow very short-term (down to 10 minutes)
+        if self.is_crypto:
+            return self.minutes_to_resolution >= config.CRYPTO_MIN_MINUTES_TO_RESOLUTION
+
+        # Non-crypto: require at least MIN_DAYS_TO_RESOLUTION
+        return self.days_to_resolution >= config.MIN_DAYS_TO_RESOLUTION
 
 
 def _parse_datetime(ts_str: Optional[str]) -> Optional[datetime]:
@@ -149,7 +174,8 @@ def _score_market(market: MarketInfo) -> float:
     - Uncertainty: closer to 50 cents = more room for mispricing
     - Spread: tighter spread = cheaper to enter and exit
     - Volume: more volume = better price discovery exists
-    - Time: more time = more chance for the trade to play out
+    - Time: more time for the trade to play out (different for crypto)
+    - Crypto boost: short-term crypto markets get a priority bonus
     """
     if not market.is_tradeable:
         return 0.0
@@ -163,21 +189,45 @@ def _score_market(market: MarketInfo) -> float:
     # Volume score (log scale, capped)
     volume_score = min(1.0, math.log10(max(1, market.volume)) / 4)
 
-    # Time score: favor 3-30 day windows
-    days = market.days_to_resolution
-    if days < 2:
-        time_score = 0.0
-    elif days <= 30:
-        time_score = min(1.0, days / 10)
-    else:
-        time_score = max(0.5, 1 - (days - 30) / 100)
+    if market.is_crypto:
+        # Crypto time scoring: favor 15 min to 4 hour windows
+        minutes = market.minutes_to_resolution
+        if minutes < 10:
+            time_score = 0.0
+        elif minutes <= 60:
+            time_score = 0.9  # Sweet spot: 10-60 min
+        elif minutes <= 240:
+            time_score = 0.7  # OK: 1-4 hours
+        else:
+            time_score = 0.4  # Long crypto, less interesting
 
-    score = (
-        uncertainty * 0.35
-        + spread_score * 0.30
-        + volume_score * 0.20
-        + time_score * 0.15
-    )
+        # Crypto gets a priority boost
+        crypto_boost = 0.15
+
+        score = (
+            uncertainty * 0.25
+            + spread_score * 0.30
+            + volume_score * 0.15
+            + time_score * 0.15
+            + crypto_boost
+        )
+    else:
+        # Non-crypto time scoring: favor 3-30 day windows
+        days = market.days_to_resolution
+        if days < 2:
+            time_score = 0.3
+        elif days <= 30:
+            time_score = min(1.0, days / 10)
+        else:
+            time_score = max(0.5, 1 - (days - 30) / 100)
+
+        score = (
+            uncertainty * 0.35
+            + spread_score * 0.30
+            + volume_score * 0.20
+            + time_score * 0.15
+        )
+
     return round(score, 4)
 
 
@@ -322,3 +372,20 @@ def fetch_open_markets(max_pages: int = 8, force_refresh: bool = False) -> list[
     _market_cache_time = time.time()
 
     return tradeable
+
+
+def fetch_crypto_markets(force_refresh: bool = False) -> list[MarketInfo]:
+    """
+    Return only crypto markets from the full market list,
+    sorted by opportunity score. These are short-term BTC/ETH/etc. markets.
+    """
+    all_markets = fetch_open_markets(force_refresh=force_refresh)
+    crypto = [m for m in all_markets if m.is_crypto]
+    crypto.sort(key=lambda m: m.opportunity_score, reverse=True)
+    if crypto:
+        logger.info(
+            f"Crypto markets: {len(crypto)} found | "
+            f"top: {crypto[0].ticker} (score={crypto[0].opportunity_score}, "
+            f"{crypto[0].minutes_to_resolution:.0f}min to resolution)"
+        )
+    return crypto
