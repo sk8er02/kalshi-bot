@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  kalshi-bot:
+    build: .
+    container_name: kalshi-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Override the key path to match the container mount
+      - KALSHI_PRIVATE_KEY_PATH=/app/keys/private_key.pem
+    volumes:
+      # Mount the private key (read-only)
+      - ./keys:/app/keys:ro
+      # Persist SQLite database across restarts
+      - ./data:/app/data
+      # Persist logs
+      - ./logs:/app/logs
+    # No ports needed — bot is outbound-only (Kalshi API + OpenRouter + Telegram)
